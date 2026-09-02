@@ -1,0 +1,3 @@
+[submodule "submodules/cva6"]
+	path = submodules/cva6
+	url = https://github.com/openhwgroup/cva6.git
