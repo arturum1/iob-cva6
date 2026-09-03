@@ -6,7 +6,7 @@
 //
 // This file is hand-written and is the *real* wrapper that instantiates
 // the CVA6 `ariane` module. It is referenced from the py2hwsw-generated
-// `iob_system_linux_iob_cva6.v` shim as a black box.
+// `cva6.v` shim as a black box.
 //
 // Reason this lives in a .sv file (not the py2hwsw snippet): the
 // py2hwsw framework emits its module body as Verilog-2001 (.v), which
@@ -18,13 +18,13 @@
 // `make convert-sv2v`. The py2hwsw-generated conf.vh (which lives in
 // the project build dir, not in this source dir) is NOT included here
 // because sv2v can't find it. At Quartus compile time, the top-level
-// iob_system_linux_iob_cva6.v still includes the conf.vh, so the
+// cva6.v still includes the conf.vh, so the
 // macros are available globally and the `ifndef` fallbacks in
 // cva6_config_pkg.sv pick up the conf.vh values (overriding the
 // sv2v-baked defaults).
 
-`ifndef IOB_SYSTEM_LINUX_IOB_CVA6_RESET_VECTOR
-  `define IOB_SYSTEM_LINUX_IOB_CVA6_RESET_VECTOR 32'h40000000
+`ifndef IOB_CVA6_RESET_VECTOR
+`define IOB_CVA6_RESET_VECTOR 32'h40000000
 `endif
 
 module cva6_wrapper #(
@@ -175,7 +175,7 @@ module cva6_wrapper #(
   ) i_ariane (
       .clk_i        (clk_i),
       .rst_ni       (rst_ni),
-      .boot_addr_i  (IOB_SYSTEM_LINUX_IOB_CVA6_RESET_VECTOR),
+      .boot_addr_i  (`IOB_CVA6_RESET_VECTOR),
       .hart_id_i    (32'h0),
       // CVA6 irq_i mapping (csr_regfile.sv:2028, :2679):
       //   irq_i[0] -> mip.MEIP (machine external)
@@ -188,7 +188,7 @@ module cva6_wrapper #(
       .rvfi_probes_o(),
       .noc_req_o    (noc_req),
       .noc_resp_i   (noc_resp)
-   );
+  );
 
   // ----------------------------------------------------------------
   // ariane NoC -> iob-system dBus (AXI4-ATOP)
@@ -279,7 +279,7 @@ module cva6_wrapper #(
   // mtime_i is consumed at the SoC level by an iob_clint; CVA6 itself
   // reads mtime via MMIO + SBI trap, so we deliberately leave it
   // dangling inside the wrapper.
-   logic unused_mtime;
+  logic unused_mtime;
   assign unused_mtime = ^mtime_i;
 
 endmodule

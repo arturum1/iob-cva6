@@ -42,11 +42,11 @@
 // If not defined, fall back to the iob-system / OpenSBI memory map:
 // IO at 0x80000000 - 0xBFFFFFFF.
 
-`ifndef IOB_SYSTEM_LINUX_IOB_CVA6_IO_REGION_BASE
-`define IOB_SYSTEM_LINUX_IOB_CVA6_IO_REGION_BASE 32'h80000000
+`ifndef IOB_CVA6_IO_REGION_BASE
+`define IOB_CVA6_IO_REGION_BASE 32'h80000000
 `endif
-`ifndef IOB_SYSTEM_LINUX_IOB_CVA6_IO_REGION_SIZE
-`define IOB_SYSTEM_LINUX_IOB_CVA6_IO_REGION_SIZE 32'h40000000
+`ifndef IOB_CVA6_IO_REGION_SIZE
+`define IOB_CVA6_IO_REGION_SIZE 32'h40000000
 `endif
 
 `endif  // CVA6_DEFAULTS_GUARD
@@ -58,8 +58,8 @@ package cva6_config_pkg;
   // -------------------------------------------------------------------
   // IO region from the conf.vh defines. The two MAIN regions are the
   // complement of the IO region within the 32-bit address space.
-  localparam logic [31:0] IoBase = IOB_SYSTEM_LINUX_IOB_CVA6_IO_REGION_BASE;
-  localparam logic [31:0] IoSize = IOB_SYSTEM_LINUX_IOB_CVA6_IO_REGION_SIZE;
+  localparam logic [31:0] IoBase = `IOB_CVA6_IO_REGION_BASE;
+  localparam logic [31:0] IoSize = `IOB_CVA6_IO_REGION_SIZE;
   localparam logic [31:0] IoTop = IoBase + IoSize;  // one-past-the-end
   localparam logic [31:0] Main0Size = IoBase;  // [0, IoBase)
   localparam logic [31:0] Main1Base = IoTop;
@@ -188,15 +188,24 @@ package cva6_config_pkg;
       PMPNapotEn: bit'(1),
       NOCType: config_pkg::NOC_TYPE_AXI4_ATOP,
       // IOb-SoC override: non-idempotent (IO) region.
-      NrNonIdempotentRules: unsigned'(1),
+      NrNonIdempotentRules:
+      unsigned'(
+      1
+      ),
       NonIdempotentAddrBase: 1024'({64'(IoBase)}),
       NonIdempotentLength: 1024'({64'(IoSize)}),
       // IOb-SoC override: executable regions across the full 32-bit space.
-      NrExecuteRegionRules: unsigned'(3),
+      NrExecuteRegionRules:
+      unsigned'(
+      3
+      ),
       ExecuteRegionAddrBase: 1024'({64'h0, 64'(IoBase), 64'(IoTop)}),
       ExecuteRegionLength: 1024'({64'(Main0Size), 64'(IoSize), 64'(Main1Size)}),
       // IOb-SoC override: cached (MAIN) regions, the complement of IO.
-      NrCachedRegionRules: unsigned'(2),
+      NrCachedRegionRules:
+      unsigned'(
+      2
+      ),
       CachedRegionAddrBase: 1024'({64'h0, 64'(Main1Base)}),
       CachedRegionLength: 1024'({64'(Main0Size), 64'(Main1Size)}),
       MaxOutstandingStores: unsigned'(7),
@@ -242,3 +251,4 @@ package cva6_config_pkg;
   };
 
 endpackage
+

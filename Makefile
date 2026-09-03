@@ -5,36 +5,51 @@
 # ==============================================================================
 # IOb-CVA6 Makefile
 # ==============================================================================
-# This Makefile regenerates the plain-Verilog sources in hardware/src/
-# by combining:
-#   - IObundle-specific SystemVerilog sources in hardware/sv/
-#     (the CPU wrapper and the 32-bit AXI / config packages)
-#   - Upstream OpenHWGroup CVA6 SystemVerilog sources from the
-#     submodules/cva6/ submodule.
-# All SV is converted to plain Verilog with sv2v so Quartus (and other
-# downstream tools) can ingest it as Verilog-2001.
+# This Makefile generates hardware/src/cva6.sv, a SINGLE self-contained
+# SystemVerilog file that the IOb-SoC build consumes for the CVA6 core.
+#
+# Why a single file: the OpenHWGroup CVA6 RTL is a tree of interdependent
+# packages + modules. Downstream tools (Vivado, Quartus, simulators) read
+# sources in command-line order; a flat glob either cannot express
+# "packages before modules" or orders them alphabetically, so a module can
+# be read before the package it references in its port/parameter list
+# (e.g. `[Synth 8-1031] ariane_pkg is not declared`). hardware/src/cva6.sv
+# concatenates every source in dependency order -- all packages first
+# (topologically sorted), then all modules -- and inlines every
+# `` `include "x.svh" `` at its exact site, so there is no ordering and no
+# include-path dependency left for the consuming tool.
+#
+# The merge is done by hardware/cva6_merge.py, which also emits a banner
+# comment (``// FILE: <basename>``) before each concatenated source so the
+# contents can be traced back to their origin file.
+#
+# This is the flat drop-in for synthesis:
+#   - Vivado : read_verilog -sv hardware/src/cva6.sv  (+ top cva6_wrapper)
+#   - Quartus: VERILOG_INPUT_VERSION SYSTEMVERILOG_2005, one source file
+#   - Simulators / Verilator: elaborate hardware/src/cva6.sv
+# No submodule include paths are required, and the VERILATOR macro is only
+# needed if a particular simulator chokes on the SV classes in the
+# instruction tracer (they sit inside `// pragma translate_off` for
+# synthesis flows).
 #
 # Layout:
-#   hardware/sv/      IObundle-specific .sv / .svh sources (committed
-#                     in git, edited by hand).
-#   hardware/src/     Generated .v files (overwritten by `make`). The
-#                     py2hwsw build copies these into the project
-#                     build directory.
+#   hardware/sv/      IObundle-specific sources (committed, hand-edited):
+#                     cva6_config_pkg.sv, cva6_wrapper.sv (top), rvfi_types.svh.
+#   hardware/src/     Generated: the single merged cva6.sv (overwritten by
+#                     `make`). This is what the py2hwsw build consumes.
+#   hardware/cva6_merge.py  The merge tool.
 #   submodules/cva6/  Upstream OpenHWGroup CVA6 (git submodule).
 #
 # Usage:
-#   make                # default target: cva6 (convert SV -> Verilog)
+#   make                # default target: cva6
 #   make cva6           # explicit
 #   make -B cva6        # force re-run
+#   make clean          # remove the generated cva6.sv
 #
 # Dependencies:
-#   - sv2v (provided by the included shell.nix; if sv2v is not in
-#     PATH the Makefile will re-invoke itself inside nix-shell
-#     automatically)
 #   - The CVA6 submodule: `git submodule update --init --recursive`
+#   - python3 (used by hardware/cva6_merge.py)
 # ==============================================================================
-
-SV2V ?= sv2v
 
 # Where everything lives (absolute paths so the recipe is robust
 # against `cd` in subshells).
@@ -42,7 +57,6 @@ CVA6_ROOT     := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 CVA6_SUB      := $(CVA6_ROOT)/submodules/cva6
 CVA6_IOB_SV   := $(CVA6_ROOT)/hardware/sv
 CVA6_SRC_DIR  := $(CVA6_ROOT)/hardware/src
-CVA6_STAGE    := $(CVA6_ROOT)/hardware/src_sv2v_stage
 
 # ==============================================================================
 # Upstream CVA6 source manifest.
@@ -111,18 +125,27 @@ CVA6_UPSTREAM_TOPS := \
     $(CVA6_SUB)/corev_apu/src/ariane.sv
 
 # Core RTL (everything under core/*.sv) minus the files that only matter
-# for configurations this build does not use: the FPU wrapper (RVF/RVD=0),
-# the cvxif interface/example drivers (CvxifEn=0) and the accelerator
-# stub / dispatcher (EnableAccelerator=0). cva6.sv is listed separately
-# above, so prune it here to avoid a duplicate.
+# for configurations this build does not use:
+#   - fpu_wrap.sv: guarded by `if (CVA6Cfg.FpPresent)`. We set FpPresent=0
+#     (RVF/RVD=0), so the synthesizer prunes the instantiation.
+#   - acc_dispatcher.sv, cva6_accel_first_pass_decoder_stub.sv: guarded
+#     by `if (CVA6Cfg.EnableAccelerator)`. We set EnableAccelerator=0.
+#   - cvxif_fu.sv: the actual coprocessor body; with CvxifEn=COPRO_NONE
+#     the cvxif_req/resp ports are tied off, no instance exists.
+#   - cvxif_compressed_if_driver.sv: guarded by `if (CVA6Cfg.CvxifEn)`.
+#     CvxifEn=COPRO_NONE in our config, so the synthesizer prunes it.
+# cva6.sv is listed separately above, so prune it here to avoid a duplicate.
+#
+# NOTE: cvxif_issue_register_commit_if_driver.sv is UNCONDITIONALLY
+# instantiated in issue_read_operands.sv (no `if (CVA6Cfg.CvxifEn)` guard
+# in upstream). It must be included even when CvxifEn=0.
 CVA6_UPSTREAM_CORE_EXCL := \
     $(CVA6_SUB)/core/cva6.sv \
     $(CVA6_SUB)/core/fpu_wrap.sv \
     $(CVA6_SUB)/core/acc_dispatcher.sv \
     $(CVA6_SUB)/core/cva6_accel_first_pass_decoder_stub.sv \
     $(CVA6_SUB)/core/cvxif_fu.sv \
-    $(CVA6_SUB)/core/cvxif_compressed_if_driver.sv \
-    $(CVA6_SUB)/core/cvxif_issue_register_commit_if_driver.sv
+    $(CVA6_SUB)/core/cvxif_compressed_if_driver.sv
 CVA6_UPSTREAM_CORE := \
     $(filter-out $(CVA6_UPSTREAM_CORE_EXCL), $(wildcard $(CVA6_SUB)/core/*.sv))
 
@@ -163,8 +186,7 @@ CVA6_UPSTREAM_HPD := \
         $(HPDCACHE_DIR)/rtl/src/common/macros/behav/hpdcache_sram_wbyteenable_1rw.sv \
         $(HPDCACHE_DIR)/rtl/src/common/macros/behav/hpdcache_sram_wmask_1rw.sv)
 
-# All upstream sources (unique basenames guaranteed when flattened into
-# the staging dir).
+# All upstream sources (unique basenames guaranteed when flattened).
 CVA6_UPSTREAM_SV := \
     $(CVA6_UPSTREAM_PKGS) \
     $(CVA6_UPSTREAM_FPGA_RAM) \
@@ -179,57 +201,72 @@ CVA6_UPSTREAM_SV := \
     $(CVA6_UPSTREAM_TRACER) \
     $(CVA6_UPSTREAM_HPD)
 
-# Upstream .svh headers (cva6.sv and ariane.sv `include these). sv2v
-# resolves them from the -I search path; we don't need to copy them
-# into the staging dir, but we still list them here so the user can see
-# what sv2v needs to find.
-CVA6_UPSTREAM_SVH := \
-    $(CVA6_SUB)/core/include/cvxif_types.svh \
-    $(CVA6_SUB)/core/include/rvfi_types.svh
+# Upstream .svh headers (cva6.sv / ariane.sv / hpdcache / instr_tracer
+# `include these). They are NOT copied to hardware/src/: the merge script
+# inlines them at their `include sites. The script locates them via the
+# CVA6_INCLUDE_DIRS override in the cva6 target.
+#   $(CVA6_SUB)/core/include/                      cvxif_types.svh, rvfi_types.svh
+#   $(CVA6_SUB)/common/local/util/                 ex_trace_item.svh, instr_trace_item.svh
+#   $(HPDCACHE_DIR)/rtl/include/                   hpdcache_typedef.svh
 
-# IObundle-specific sources. These live in hardware/sv/ (committed):
-# cva6_wrapper.sv (the ariane black-box wrapper), cva6_config_pkg.sv
-# (self-contained 32-bit config; replaces upstream ${TARGET_CFG}_config_pkg.sv)
-# and the rvfi_types.svh copy.
-CVA6_IOB_SOURCES := $(wildcard $(CVA6_IOB_SV)/*.sv) $(wildcard $(CVA6_IOB_SV)/*.svh)
+# ==============================================================================
+# Single-file merge order.
+# ==============================================================================
+# hardware/src/cva6.sv is built by hardware/cva6_merge.py. Packages MUST be
+# emitted before any module that references their types (a module's port /
+# parameter list can use `config_pkg::cva6_cfg_t`, `ariane_pkg::*`, etc.),
+# and packages must precede the packages they depend on. This is the
+# topological order for this configuration:
+#
+#   config_pkg                     (leaf)
+#   axi_pkg                        (leaf)
+#   cva6_config_pkg                (IOB; -> config_pkg)
+#   riscv_pkg        (pkg `riscv`) (-> cva6_config_pkg)
+#   ariane_axi_pkg   (pkg `ariane_axi`) (-> axi_pkg, cva6_config_pkg)
+#   ariane_pkg                     (-> config_pkg, cva6_config_pkg)
+#   std_cache_pkg                  (-> ariane_pkg)
+#   build_config_pkg               (-> config_pkg)
+#   cf_math_pkg                    (leaf)
+#   wt_cache_pkg                   (leaf)
+#   hpdcache_pkg                   (leaf)
+#   aes_pkg                        (leaf)
+#   triggers_pkg                   (leaf)
+#   instr_tracer_pkg               (leaf)
+#   dummy_l15_pkg   (pkg `l15_pkg`)(leaf)
+#   hwpf_stride_pkg                (leaf)
+CVA6_MERGE_PKGS := \
+    $(CVA6_SUB)/core/include/config_pkg.sv \
+    $(CVA6_SUB)/vendor/pulp-platform/axi/src/axi_pkg.sv \
+    $(CVA6_IOB_SV)/cva6_config_pkg.sv \
+    $(CVA6_SUB)/core/include/riscv_pkg.sv \
+    $(CVA6_SUB)/corev_apu/tb/ariane_axi_pkg.sv \
+    $(CVA6_SUB)/core/include/ariane_pkg.sv \
+    $(CVA6_SUB)/core/include/std_cache_pkg.sv \
+    $(CVA6_SUB)/core/include/build_config_pkg.sv \
+    $(CVA6_SUB)/vendor/pulp-platform/common_cells/src/cf_math_pkg.sv \
+    $(CVA6_SUB)/core/include/wt_cache_pkg.sv \
+    $(HPDCACHE_DIR)/rtl/src/hpdcache_pkg.sv \
+    $(CVA6_SUB)/core/include/aes_pkg.sv \
+    $(CVA6_SUB)/core/include/triggers_pkg.sv \
+    $(CVA6_SUB)/core/include/instr_tracer_pkg.sv \
+    $(CVA6_SUB)/core/include/dummy_l15_pkg.sv \
+    $(HPDCACHE_DIR)/rtl/src/hwpf_stride/hwpf_stride_pkg.sv
 
-# sv2v include paths. The upstream CVA6 sources `include files from
-# these directories; we pass them all so sv2v can resolve them. The
-# staging dir is first so the just-copied files win if there is a name
-# collision (there shouldn't be).
-CVA6_SV2V_INCDIR := \
-    -I $(CVA6_STAGE) \
-    -I $(CVA6_IOB_SV) \
-    -I $(CVA6_SUB)/core/include \
-    -I $(CVA6_SUB)/vendor/pulp-platform/axi/include \
-    -I $(CVA6_SUB)/vendor/pulp-platform/common_cells/include \
-    -I $(CVA6_SUB)/vendor/pulp-platform/common_cells/src \
-    -I $(CVA6_SUB)/common/local/util \
-    -I $(HPDCACHE_DIR)/rtl/include
+# Everything else is a module. Modules do not need ordering among
+# themselves (instantiation is by reference), so we use the upstream
+# manifest order and append the IOb top wrapper last. cva6_wrapper.sv is
+# the SoC top and references ariane_axi types, so it must come after all
+# packages (it does, being a module). hpdcache_pkg / hwpf_stride_pkg which
+# appear in CVA6_UPSTREAM_HPD are filtered out (they are packages).
+CVA6_MERGE_MODULES := \
+    $(filter-out $(CVA6_MERGE_PKGS), $(CVA6_UPSTREAM_SV)) \
+    $(CVA6_IOB_SV)/cva6_wrapper.sv
 
-# Define the IOb-CVA6 conf.vh macros at the command line so the
-# conversion doesn't need the conf.vh file (which is project-specific
-# and lives in the project build dir, not in this source dir).
-# `VERILATOR` skips the struct-`/class-based RVFI trace formatting in
-# instr_tracer.sv / ex_trace_item.svh / instr_trace_item.svh (which is
-# simulation-only code guarded by `ifndef VERILATOR`).
-CVA6_SV2V_DEFINES := \
-    -D VERILATOR \
-    -D IOB_SYSTEM_LINUX_IOB_CVA6_RESET_VECTOR=32\'h40000000 \
-    -D IOB_SYSTEM_LINUX_IOB_CVA6_IO_REGION_BASE=32\'h80000000 \
-    -D IOB_SYSTEM_LINUX_IOB_CVA6_IO_REGION_SIZE=32\'h40000000
+CVA6_MERGE_SCRIPT := $(CVA6_ROOT)/hardware/cva6_merge.py
+CVA6_MERGED     := $(CVA6_SRC_DIR)/cva6.sv
 
-.PHONY: cva6 convert-sv2v
-cva6 convert-sv2v:
-	@if ! command -v $(SV2V) >/dev/null 2>&1; then \
-	    if [ -f "$(CVA6_ROOT)/shell.nix" ]; then \
-	        echo "$(SV2V) not found in PATH, re-invoking inside nix-shell ..."; \
-	        exec nix-shell --run "$(MAKE) $(MAKECMDGOALS)"; \
-	    else \
-	        echo "ERROR: $(SV2V) not found in PATH and no shell.nix found."; \
-	        exit 1; \
-	    fi; \
-	fi
+.PHONY: cva6
+cva6:
 	@if [ ! -f "$(CVA6_SUB)/core/cva6.sv" ]; then \
 	    echo "ERROR: CVA6 submodule not initialised."; \
 	    echo "  Run: git submodule update --init --recursive"; \
@@ -237,49 +274,35 @@ cva6 convert-sv2v:
 	fi
 	@if [ -z "$(wildcard $(CVA6_IOB_SV)/*.sv)" ]; then \
 	    echo "ERROR: no IObundle-specific sources in $(CVA6_IOB_SV)/."; \
-	    echo "  Expected at least cva6_wrapper.sv, cva6_config_pkg.sv,"; \
-	    echo "  cva6_axi_pkg.sv."; \
+	    echo "  Expected at least cva6_wrapper.sv, cva6_config_pkg.sv."; \
 	    exit 1; \
 	fi
-	@echo "=== Stage 1/3: copy sources to $(CVA6_STAGE)/ ==="
-	@rm -rf $(CVA6_STAGE)
-	@mkdir -p $(CVA6_STAGE)
-	@cp -f $(CVA6_UPSTREAM_SV) $(CVA6_STAGE)/
-	@cp -f $(CVA6_UPSTREAM_SVH) $(CVA6_STAGE)/
-	@cp -f $(CVA6_IOB_SOURCES) $(CVA6_STAGE)/
-	@echo "  Copied $$(ls -1 $(CVA6_STAGE) | wc -l) files"
-	@echo ""
-	@echo "=== Stage 2/3: convert .sv -> .v via $(SV2V) ==="
-	@echo "  NOTE: this stage is single-threaded and can take 30-40 min"
-	@echo "  on the full CVA6 source set -- please be patient."
-	@echo "  (packages must be elaborated together in a single sv2v call)"
-	@cd $(CVA6_STAGE) && \
-	rm -rf $(CVA6_STAGE)/.sv2v_cache && \
-	$(SV2V) $(CVA6_SV2V_INCDIR) $(CVA6_SV2V_DEFINES) -w $(CVA6_STAGE) *.sv && \
-	rm -f $(CVA6_STAGE)/*.sv $(CVA6_STAGE)/*.svh
-	@echo "  Converted $$(ls -1 $(CVA6_STAGE)/*.v 2>/dev/null | wc -l) files"
-	@echo ""
-	@echo "=== Stage 3/3: replace hardware/src/ with the converted .v files ==="
+	@echo "=== Merging SystemVerilog sources into $(CVA6_MERGED) ==="
+	@mkdir -p $(CVA6_SRC_DIR)
 	@rm -f $(CVA6_SRC_DIR)/*.sv $(CVA6_SRC_DIR)/*.svh $(CVA6_SRC_DIR)/*.v
-	@cp -f $(CVA6_STAGE)/*.v $(CVA6_SRC_DIR)/
-	@rm -rf $(CVA6_STAGE)
-	@echo "  hardware/src/ now contains:"
-	@ls -1 $(CVA6_SRC_DIR)/*.v | sed 's/^/    /'
+	@CVA6_INCLUDE_DIRS="$(CVA6_SUB)/core/include:$(CVA6_SUB)/common/local/util:$(HPDCACHE_DIR)/rtl/include" \
+	    python3 $(CVA6_MERGE_SCRIPT) $(CVA6_MERGED) \
+	    $(CVA6_MERGE_PKGS) $(CVA6_MERGE_MODULES)
 	@echo ""
-	@echo "Next step: run your py2hwsw build (e.g. 'make' in the"
-	@echo "project dir) so the .v files are copied to the build"
-	@echo "directory and Quartus picks them up via VSRC."
+	@echo "Result: $(CVA6_MERGED)"
+	@echo "  ($$(grep -c '^package ' $(CVA6_MERGED)) packages, \
+$$(grep -c '^module ' $(CVA6_MERGED)) modules, \
+$$(wc -l < $(CVA6_MERGED)) lines)"
+	@echo ""
+	@echo "This is the flat, self-contained CVA6 for the SoC build:"
+	@echo "  - Vivado : read_verilog -sv $(CVA6_MERGED)  (+ top cva6_wrapper)"
+	@echo "  - Quartus: VERILOG_INPUT_VERSION SYSTEMVERILOG_2005, one file"
+	@echo "  - No submodule include paths are required."
 
 .PHONY: clean
 clean:
-	@echo "Removing generated .v files from $(CVA6_SRC_DIR)/"
-	@rm -f $(CVA6_SRC_DIR)/*.v
-	@rm -f $(CVA6_STAGE)/*
+	@echo "Removing generated $(CVA6_MERGED)"
+	@rm -f $(CVA6_MERGED)
 
 .PHONY: clean-submodules
 clean-submodules:
 	git submodule foreach --recursive git clean -ffdx
 
-.PHONY: cva6 convert-sv2v clean clean-submodules
+.PHONY: cva6 clean clean-submodules
 # Default target.
 .DEFAULT_GOAL := cva6
